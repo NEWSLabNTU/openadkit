@@ -18,7 +18,7 @@
     cd openadkit
     ```
 
-2. Setup the runtime environment by running the following command, requires sudo privileges ( Skip if you already have the environment setup on your platform ):
+2. Setup the runtime environment by running the `setup.sh` script located at the root of the repository. This requires sudo privileges (skip if you already have the environment setup on your platform):
 
     ```bash
     sudo ./setup.sh
@@ -34,7 +34,5 @@
 
 ## Next Steps
 
-- [Running a Deployment Sample](../deployments/)
-- Learn more about the Open AD Kit components
-  - [Components](../components/)
-  - [Tools](../tools/)
+- [Running a sample deployment](../deployments/)
+- [Learn more about the Open AD Kit components](../components/)
