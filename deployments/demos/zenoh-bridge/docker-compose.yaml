@@ -12,7 +12,7 @@ services:
       map_path:=/autoware_map
       vehicle_model:=sample_vehicle
       sensor_model:=sample_sensor_kit
-      scenario_simulation:=true
+      scenario_simulation:=${SCENARIO_SIMULATION:-true}
       rviz:=false"
     depends_on: 
       - edge_zenoh_bridge
@@ -40,7 +40,7 @@ services:
       -c /config/zenoh-bridge-ros2dds.json5
 
   visualizer:
-    image: ghcr.io/autowarefoundation/autoware-tools@sha256:72bf3a15106bf284fda123bd6e1de993f94ad7fce46cd5117451d3e33cebad90
+    image: ghcr.io/autowarefoundation/autoware-tools:visualizer-20251009
     environment:
       - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=1
@@ -63,6 +63,17 @@ services:
     command: >
       -l tcp/0.0.0.0:7448
       -c /config/zenoh-bridge-ros2dds.json5
+
+  teleop:
+    image: ghcr.io/evshary/autoware_manual_control:feat-ci-image-release
+    environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - ROS_DOMAIN_ID=1
+    volumes:
+      - ./teleop/teleop_config.yaml:/autoware_manual_control_ws/src/autoware_manual_control/teleop_config.yaml
+    command: sleep infinity
+    depends_on:
+      - cloud_zenoh_bridge
 
 volumes:
   autoware_map:
