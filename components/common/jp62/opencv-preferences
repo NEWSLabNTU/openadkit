@@ -1,0 +1,12 @@
+# Prefer Ubuntu repository OpenCV packages over NVIDIA L4T
+Package: libopencv*
+Pin: release o=Ubuntu
+Pin-Priority: 1001
+
+Package: opencv-data
+Pin: release o=Ubuntu
+Pin-Priority: 1001
+
+Package: python3-opencv
+Pin: release o=Ubuntu
+Pin-Priority: 1001

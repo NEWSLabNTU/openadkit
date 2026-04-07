@@ -9,7 +9,7 @@ print_help() {
 	echo "Usage: build.sh [OPTIONS]"
 	echo "Options:"
 	echo "  -h | --help     Display this help message"
-	echo "  --platform      Specify the platform (linux/amd64 or linux/arm64, default: current platform)"
+	echo "  --platform      Specify the platform (linux/amd64, linux/arm64, or jp62; default: current platform)"
 	echo "  --ros-distro    Specify ROS distribution (humble or jazzy, default: humble)"
 	echo "  --no-cuda       Do not build CUDA images (default: false)"
 	echo "  --target        Specify the target images to build (common, components, universe, default: components)"
@@ -76,6 +76,12 @@ set_platform() {
 			platform="linux/arm64"
 		fi
 	fi
+
+	# JP62 (Jetson Linux 6.2) is always arm64
+	if [ "$platform" = "jp62" ]; then
+		is_jp62=true
+		platform="linux/arm64"
+	fi
 }
 
 # Clone autoware repositories
@@ -114,6 +120,7 @@ build_images() {
 	echo "Building images with:"
 	echo "  Target: $target"
 	echo "  Platform: $platform"
+	echo "  JP62: $([ "$is_jp62" = "true" ] && echo "yes" || echo "no")"
 	echo "  ROS distro: $ros_distro"
 	echo "  Base image: $base_image"
 	echo "  CUDA: $([ "$option_no_cuda" = "true" ] && echo "disabled" || echo "enabled")"
@@ -123,26 +130,38 @@ build_images() {
 	# =========================================================================
 	# Stage 1: Common images
 	# =========================================================================
-	docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
-		--set "*.context=$WORKSPACE_ROOT" \
-		--set "*.ssh=default" \
-		--set "*.platform=$platform" \
-		--set "*.args.ROS_DISTRO=$ros_distro" \
-		--set "*.args.BASE_IMAGE=$base_image" \
-		--set "common-base.tags=${image_common}:base" \
-		--set "common-devel.tags=${image_common}:devel" \
-		common-base common-devel
-
-	if [ "$option_no_cuda" != "true" ]; then
+	if [ "$is_jp62" = "true" ]; then
+		# JP62: build Jetson-specific common images (CUDA is always included)
+		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+			--set "*.context=$WORKSPACE_ROOT" \
+			--set "*.ssh=default" \
+			--set "*.platform=$platform" \
+			--set "*.args.ROS_DISTRO=$ros_distro" \
+			--set "common-base-jp62.tags=${image_common}:base-jp62" \
+			--set "common-devel-jp62.tags=${image_common}:devel-jp62" \
+			common-base-jp62 common-devel-jp62
+	else
 		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
 			--set "*.context=$WORKSPACE_ROOT" \
 			--set "*.ssh=default" \
 			--set "*.platform=$platform" \
 			--set "*.args.ROS_DISTRO=$ros_distro" \
 			--set "*.args.BASE_IMAGE=$base_image" \
-			--set "common-base-cuda.tags=${image_common}:base-cuda" \
-			--set "common-devel-cuda.tags=${image_common}:devel-cuda" \
-			common-base-cuda common-devel-cuda
+			--set "common-base.tags=${image_common}:base" \
+			--set "common-devel.tags=${image_common}:devel" \
+			common-base common-devel
+
+		if [ "$option_no_cuda" != "true" ]; then
+			docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+				--set "*.context=$WORKSPACE_ROOT" \
+				--set "*.ssh=default" \
+				--set "*.platform=$platform" \
+				--set "*.args.ROS_DISTRO=$ros_distro" \
+				--set "*.args.BASE_IMAGE=$base_image" \
+				--set "common-base-cuda.tags=${image_common}:base-cuda" \
+				--set "common-devel-cuda.tags=${image_common}:devel-cuda" \
+				common-base-cuda common-devel-cuda
+		fi
 	fi
 
 	if [ "$target" = "common" ]; then
@@ -153,32 +172,61 @@ build_images() {
 	# =========================================================================
 	# Stage 2: Component images
 	# =========================================================================
-	docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
-		--set "*.context=$WORKSPACE_ROOT" \
-		--set "*.ssh=default" \
-		--set "*.platform=$platform" \
-		--set "*.args.ROS_DISTRO=$ros_distro" \
-		--set "*.args.COMMON_BASE_IMAGE=${image_common}:base" \
-		--set "*.args.COMMON_DEVEL_IMAGE=${image_common}:devel" \
-		--set "sensing-perception.tags=${image_component}:sensing-perception" \
-		--set "localization-mapping.tags=${image_component}:localization-mapping" \
-		--set "planning-control.tags=${image_component}:planning-control" \
-		--set "vehicle-system.tags=${image_component}:vehicle-system" \
-		--set "api.tags=${image_component}:api" \
-		--set "visualizer.tags=${image_component}:visualizer" \
-		--set "simulator.tags=${image_component}:simulator" \
-		sensing-perception localization-mapping planning-control vehicle-system api visualizer simulator
-
-	if [ "$option_no_cuda" != "true" ]; then
+	if [ "$is_jp62" = "true" ]; then
+		# JP62: feed JP62 common images into the CUDA Dockerfiles.
+		# The JP62 base/devel images fulfill the same contract as common-base-cuda / common-devel-cuda.
 		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
 			--set "*.context=$WORKSPACE_ROOT" \
 			--set "*.ssh=default" \
 			--set "*.platform=$platform" \
 			--set "*.args.ROS_DISTRO=$ros_distro" \
-			--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-cuda" \
-			--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-cuda" \
-			--set "sensing-perception-cuda.tags=${image_component}:sensing-perception-cuda" \
+			--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-jp62" \
+			--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-jp62" \
+			--set "sensing-perception-cuda.tags=${image_component}:sensing-perception-jp62" \
 			sensing-perception-cuda
+
+		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+			--set "*.context=$WORKSPACE_ROOT" \
+			--set "*.ssh=default" \
+			--set "*.platform=$platform" \
+			--set "*.args.ROS_DISTRO=$ros_distro" \
+			--set "*.args.COMMON_BASE_IMAGE=${image_common}:base-jp62" \
+			--set "*.args.COMMON_DEVEL_IMAGE=${image_common}:devel-jp62" \
+			--set "localization-mapping.tags=${image_component}:localization-mapping-jp62" \
+			--set "planning-control.tags=${image_component}:planning-control-jp62" \
+			--set "vehicle-system.tags=${image_component}:vehicle-system-jp62" \
+			--set "api.tags=${image_component}:api-jp62" \
+			--set "visualizer.tags=${image_component}:visualizer-jp62" \
+			--set "simulator.tags=${image_component}:simulator-jp62" \
+			localization-mapping planning-control vehicle-system api visualizer simulator
+	else
+		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+			--set "*.context=$WORKSPACE_ROOT" \
+			--set "*.ssh=default" \
+			--set "*.platform=$platform" \
+			--set "*.args.ROS_DISTRO=$ros_distro" \
+			--set "*.args.COMMON_BASE_IMAGE=${image_common}:base" \
+			--set "*.args.COMMON_DEVEL_IMAGE=${image_common}:devel" \
+			--set "sensing-perception.tags=${image_component}:sensing-perception" \
+			--set "localization-mapping.tags=${image_component}:localization-mapping" \
+			--set "planning-control.tags=${image_component}:planning-control" \
+			--set "vehicle-system.tags=${image_component}:vehicle-system" \
+			--set "api.tags=${image_component}:api" \
+			--set "visualizer.tags=${image_component}:visualizer" \
+			--set "simulator.tags=${image_component}:simulator" \
+			sensing-perception localization-mapping planning-control vehicle-system api visualizer simulator
+
+		if [ "$option_no_cuda" != "true" ]; then
+			docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+				--set "*.context=$WORKSPACE_ROOT" \
+				--set "*.ssh=default" \
+				--set "*.platform=$platform" \
+				--set "*.args.ROS_DISTRO=$ros_distro" \
+				--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-cuda" \
+				--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-cuda" \
+				--set "sensing-perception-cuda.tags=${image_component}:sensing-perception-cuda" \
+				sensing-perception-cuda
+		fi
 	fi
 
 	if [ "$target" = "components" ]; then
@@ -189,40 +237,59 @@ build_images() {
 	# =========================================================================
 	# Stage 3: Universe images
 	# =========================================================================
-	docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
-		--set "*.context=$WORKSPACE_ROOT" \
-		--set "*.ssh=default" \
-		--set "*.platform=$platform" \
-		--set "*.args.ROS_DISTRO=$ros_distro" \
-		--set "*.args.COMMON_BASE_IMAGE=${image_common}:base" \
-		--set "*.args.COMMON_DEVEL_IMAGE=${image_common}:devel" \
-		--set "*.args.SENSING_PERCEPTION_IMAGE=${image_component}:sensing-perception" \
-		--set "*.args.LOCALIZATION_MAPPING_IMAGE=${image_component}:localization-mapping" \
-		--set "*.args.PLANNING_CONTROL_IMAGE=${image_component}:planning-control" \
-		--set "*.args.VEHICLE_SYSTEM_IMAGE=${image_component}:vehicle-system" \
-		--set "*.args.API_IMAGE=${image_component}:api" \
-		--set "*.args.VISUALIZER_IMAGE=${image_component}:visualizer" \
-		--set "*.args.SIMULATOR_IMAGE=${image_component}:simulator" \
-		--set "universe.tags=${image_component}:universe" \
-		universe
-
-	if [ "$option_no_cuda" != "true" ]; then
+	if [ "$is_jp62" = "true" ]; then
 		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
 			--set "*.context=$WORKSPACE_ROOT" \
 			--set "*.ssh=default" \
 			--set "*.platform=$platform" \
 			--set "*.args.ROS_DISTRO=$ros_distro" \
-			--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-cuda" \
-			--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-cuda" \
-			--set "*.args.SENSING_PERCEPTION_CUDA_IMAGE=${image_component}:sensing-perception-cuda" \
+			--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-jp62" \
+			--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-jp62" \
+			--set "*.args.SENSING_PERCEPTION_CUDA_IMAGE=${image_component}:sensing-perception-jp62" \
+			--set "*.args.LOCALIZATION_MAPPING_IMAGE=${image_component}:localization-mapping-jp62" \
+			--set "*.args.PLANNING_CONTROL_IMAGE=${image_component}:planning-control-jp62" \
+			--set "*.args.VEHICLE_SYSTEM_IMAGE=${image_component}:vehicle-system-jp62" \
+			--set "*.args.API_IMAGE=${image_component}:api-jp62" \
+			--set "*.args.VISUALIZER_IMAGE=${image_component}:visualizer-jp62" \
+			--set "*.args.SIMULATOR_IMAGE=${image_component}:simulator-jp62" \
+			--set "universe-cuda.tags=${image_component}:universe-jp62" \
+			universe-cuda
+	else
+		docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+			--set "*.context=$WORKSPACE_ROOT" \
+			--set "*.ssh=default" \
+			--set "*.platform=$platform" \
+			--set "*.args.ROS_DISTRO=$ros_distro" \
+			--set "*.args.COMMON_BASE_IMAGE=${image_common}:base" \
+			--set "*.args.COMMON_DEVEL_IMAGE=${image_common}:devel" \
+			--set "*.args.SENSING_PERCEPTION_IMAGE=${image_component}:sensing-perception" \
 			--set "*.args.LOCALIZATION_MAPPING_IMAGE=${image_component}:localization-mapping" \
 			--set "*.args.PLANNING_CONTROL_IMAGE=${image_component}:planning-control" \
 			--set "*.args.VEHICLE_SYSTEM_IMAGE=${image_component}:vehicle-system" \
 			--set "*.args.API_IMAGE=${image_component}:api" \
 			--set "*.args.VISUALIZER_IMAGE=${image_component}:visualizer" \
 			--set "*.args.SIMULATOR_IMAGE=${image_component}:simulator" \
-			--set "universe-cuda.tags=${image_component}:universe-cuda" \
-			universe-cuda
+			--set "universe.tags=${image_component}:universe" \
+			universe
+
+		if [ "$option_no_cuda" != "true" ]; then
+			docker buildx bake --allow=ssh --load --progress=plain -f "$bake_file" \
+				--set "*.context=$WORKSPACE_ROOT" \
+				--set "*.ssh=default" \
+				--set "*.platform=$platform" \
+				--set "*.args.ROS_DISTRO=$ros_distro" \
+				--set "*.args.COMMON_BASE_CUDA_IMAGE=${image_common}:base-cuda" \
+				--set "*.args.COMMON_DEVEL_CUDA_IMAGE=${image_common}:devel-cuda" \
+				--set "*.args.SENSING_PERCEPTION_CUDA_IMAGE=${image_component}:sensing-perception-cuda" \
+				--set "*.args.LOCALIZATION_MAPPING_IMAGE=${image_component}:localization-mapping" \
+				--set "*.args.PLANNING_CONTROL_IMAGE=${image_component}:planning-control" \
+				--set "*.args.VEHICLE_SYSTEM_IMAGE=${image_component}:vehicle-system" \
+				--set "*.args.API_IMAGE=${image_component}:api" \
+				--set "*.args.VISUALIZER_IMAGE=${image_component}:visualizer" \
+				--set "*.args.SIMULATOR_IMAGE=${image_component}:simulator" \
+				--set "universe-cuda.tags=${image_component}:universe-cuda" \
+				universe-cuda
+		fi
 	fi
 
 	set +x

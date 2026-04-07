@@ -1,0 +1,214 @@
+# Dockerfile.jp62 - Builds common-base and common-devel images for Jetson Linux 6.2
+#
+# JetPack 6.2 base: L4T r36.4.x with CUDA 12.6, cuDNN 9.3, TensorRT 10.3
+# Platform: linux/arm64 only (Jetson Orin)
+# CUDA is always present — there is no non-CUDA JP62 variant.
+#
+# Image contract:
+#   common-base-jp62  ≈ common-base-cuda  (ROS + CUDA runtime, ready for setup-dev-env.sh)
+#   common-devel-jp62 ≈ common-devel-cuda (+ Autoware dev tools + common packages built)
+#
+# Downstream component Dockerfile.cuda files consume these via:
+#   ARG COMMON_BASE_CUDA_IMAGE=...:base-jp62-humble
+#   ARG COMMON_DEVEL_CUDA_IMAGE=...:devel-jp62-humble
+
+ARG JP62_BASE_IMAGE=nvcr.io/nvidia/l4t-tensorrt:r10.3.0-devel
+ARG ROS_DISTRO=humble
+
+# =============================================================================
+# Stage: jp62-setup
+# L4T-specific bootstrapping that has no equivalent in the x86 path:
+# locale, OpenCV downgrade, CMake upgrade, ROS 2 from scratch, L4T NVIDIA
+# packages, CUDA env, spconv/cumm.
+# =============================================================================
+FROM $JP62_BASE_IMAGE AS jp62-setup
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG ROS_DISTRO
+
+# --- Locale & timezone -------------------------------------------------------
+RUN apt-get update && apt-get install -y locales \
+  && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen \
+  && locale-gen \
+  && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+ENV LANG=en_US.UTF-8
+RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone
+
+# --- APT sources -------------------------------------------------------------
+RUN apt-get install -y software-properties-common apt-transport-https \
+  && add-apt-repository universe
+
+# AutonomouStuff repository (pacmod3 packages)
+RUN echo "deb [trusted=yes] https://s3.amazonaws.com/autonomoustuff-repo/ jammy main" \
+  | tee /etc/apt/sources.list.d/autonomoustuff-public.list > /dev/null
+
+# --- Replace L4T OpenCV 4.8.0 with Ubuntu OpenCV 4.5.4 ----------------------
+# L4T ships a non-APT OpenCV 4.8.0 that conflicts with ROS cv_bridge.
+# We remove all traces of it and pin APT to the Ubuntu version.
+RUN rm -rf /usr/lib/libopencv* /usr/lib/cmake/opencv4 /usr/include/opencv4 \
+           /usr/local/lib/libopencv* /usr/local/lib/cmake/opencv4 /usr/local/include/opencv4 \
+           /usr/share/OpenCV /usr/share/opencv4 \
+           /opt/opencv*
+COPY components/common/jp62/opencv-preferences /etc/apt/preferences.d/opencv-preferences
+RUN apt-get update && apt-get install -y libopencv-dev
+
+# --- Replace L4T CMake 3.14.4 with system CMake >= 3.22 ---------------------
+# Autoware requires CMake >= 3.16. L4T ships 3.14.4 in /usr/local/bin.
+RUN rm -f /usr/local/bin/cmake /usr/local/bin/ctest /usr/local/bin/cpack /usr/local/bin/ccmake
+RUN apt-get update && apt-get install -y cmake
+
+# --- Install ROS 2 from apt -------------------------------------------------
+# L4T does not ship ROS; install following the official Ubuntu debs guide.
+RUN apt-get install -y curl gnupg lsb-release \
+  && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+       -o /usr/share/keyrings/ros-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+       http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+       | tee /etc/apt/sources.list.d/ros2.list > /dev/null \
+  && apt-get update \
+  && apt-get install -y ros-${ROS_DISTRO}-desktop ros-dev-tools
+
+# rosdep update may fail on transient 503s from GitHub CDN; tolerate it here
+# since the devel stage runs rosdep update again before resolving keys.
+RUN rosdep init || true; rosdep update || true
+
+# --- NVIDIA L4T APT sources (r36.4 / JetPack 6.2) ---------------------------
+RUN apt-key adv --fetch-key http://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
+  && echo "deb https://repo.download.nvidia.com/jetson/common r36.4 main"  >  /etc/apt/sources.list.d/nvidia-l4t-apt-source.list \
+  && echo "deb https://repo.download.nvidia.com/jetson/t234 r36.4 main"    >> /etc/apt/sources.list.d/nvidia-l4t-apt-source.list \
+  && echo "deb https://repo.download.nvidia.com/jetson/ffmpeg r36.4 main"  >> /etc/apt/sources.list.d/nvidia-l4t-apt-source.list \
+  && mkdir -p /opt/nvidia/l4t-packages \
+  && touch /opt/nvidia/l4t-packages/.nv-l4t-disable-boot-fw-update-in-preinstall \
+  && apt-get update
+
+# L4T runtime packages: CUDA driver stubs, DLA compiler, cuDNN headers
+RUN apt-get install -o DPkg::Options::="--force-confold" -y \
+  nvidia-l4t-core \
+  nvidia-l4t-cuda \
+  nvidia-l4t-dla-compiler \
+  libcudnn9-dev-cuda-12
+
+# --- CUDA environment --------------------------------------------------------
+# CUDAARCHS=87 targets Orin (avoids "native" detection that fails under QEMU).
+ENV CUDA_HOME=/usr/local/cuda
+ENV CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+ENV PATH=/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV CUDAARCHS=87
+
+# --- spconv / cumm (sparse convolution for BEVFusion / perception) -----------
+RUN wget -q https://github.com/autowarefoundation/spconv_cpp/releases/download/spconv_v2.3.8%2Bcumm_v0.5.3%2Bcu128/cumm_0.5.3_arm64-jetson.deb \
+  && wget -q https://github.com/autowarefoundation/spconv_cpp/releases/download/spconv_v2.3.8%2Bcumm_v0.5.3%2Bcu128/spconv_2.3.8_arm64-jetson.deb \
+  && apt-get install -y ./cumm_0.5.3_arm64-jetson.deb ./spconv_2.3.8_arm64-jetson.deb \
+  && rm -f cumm_0.5.3_arm64-jetson.deb spconv_2.3.8_arm64-jetson.deb
+
+# =============================================================================
+# Stage: common-base-jp62
+# Base runtime image — contract-equivalent to common-base-cuda on x86.
+# Provides: ROS, CUDA runtime, Autoware base deps via setup-dev-env.sh.
+# =============================================================================
+FROM jp62-setup AS common-base-jp62
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG ROS_DISTRO
+ENV CCACHE_DIR="/root/.ccache"
+WORKDIR /autoware
+
+# Copy Autoware setup scripts and openadkit helper scripts
+COPY autoware/setup-dev-env.sh autoware/ansible-galaxy-requirements.yaml /autoware/
+COPY autoware/ansible/ /autoware/ansible/
+COPY components/common/scripts/ /scripts/
+RUN chmod -R +x /scripts/
+
+# Disable suggested/recommended APT packages
+RUN echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-disable-extra-packages; \
+    echo 'APT::Install-Suggests "false";' >> /etc/apt/apt.conf.d/99-disable-extra-packages
+
+# Install base APT packages and add GitHub to known hosts
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+  && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' >/etc/apt/apt.conf.d/keep-cache
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
+  gosu \
+  ssh \
+  && /scripts/cleanup_apt.sh \
+  && mkdir -p ~/.ssh \
+  && ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+# Set up Autoware base environment.
+# --no-nvidia --no-cuda-drivers: L4T already provides the full NVIDIA stack;
+# the ansible nvidia/cuda-driver modules would conflict with the L4T packages.
+RUN --mount=type=ssh \
+  --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  ./setup-dev-env.sh -y --module base --no-nvidia --no-cuda-drivers --runtime openadkit --ros-distro "$ROS_DISTRO" \
+  && pipx uninstall ansible \
+  && /scripts/cleanup_apt.sh true \
+  && echo "source /opt/ros/${ROS_DISTRO}/setup.bash" > /etc/bash.bashrc
+
+# =============================================================================
+# Stage: common-devel-jp62
+# Development image — contract-equivalent to common-devel-cuda on x86.
+# Provides: everything in base + Autoware dev tools + universe common packages.
+# =============================================================================
+FROM common-base-jp62 AS common-devel-jp62
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG ROS_DISTRO
+
+# Set up full Autoware development environment.
+# --no-nvidia --no-cuda-drivers: the CUDA ansible role installs from the
+# ubuntu2204/sbsa repository, which conflicts with L4T's pre-installed CUDA.
+# All NVIDIA/CUDA packages are already provided by the jp62-setup stage.
+RUN --mount=type=ssh \
+  --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  ./setup-dev-env.sh -y --module all --no-nvidia --no-cuda-drivers --ros-distro "$ROS_DISTRO" openadkit \
+  && ./setup-dev-env.sh -y --module dev-tools --ros-distro "$ROS_DISTRO" openadkit \
+  && pipx uninstall ansible \
+  && apt-mark manual ros-${ROS_DISTRO}-desktop ros-${ROS_DISTRO}-builtin-interfaces \
+  && /scripts/cleanup_apt.sh \
+  && echo "source /opt/ros/${ROS_DISTRO}/setup.bash" > /etc/bash.bashrc
+
+# Register the default colcon mixin index.
+# The x86 path inherits this from the ros: base image; L4T does not have it.
+RUN colcon mixin add default https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml; \
+    for i in 1 2 3; do colcon mixin update default && break || sleep 10; done
+
+# Install rosdep dependencies for autoware-universe common packages
+RUN --mount=type=ssh \
+  --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=bind,source=autoware/src/core,target=/autoware/src/core \
+  --mount=type=bind,source=autoware/src/universe/autoware_universe/common,target=/autoware/src/universe/autoware_universe/common \
+  --mount=type=bind,source=autoware/src/universe/autoware_universe/evaluator,target=/autoware/src/universe/autoware_universe/evaluator \
+  --mount=type=bind,source=autoware/src/universe/external/eagleye,target=/autoware/src/universe/external/eagleye \
+  --mount=type=bind,source=autoware/src/universe/external/glog,target=/autoware/src/universe/external/glog \
+  --mount=type=bind,source=autoware/src/universe/external/llh_converter,target=/autoware/src/universe/external/llh_converter \
+  --mount=type=bind,source=autoware/src/universe/external/managed_transform_buffer,target=/autoware/src/universe/external/managed_transform_buffer \
+  --mount=type=bind,source=autoware/src/universe/external/morai_msgs,target=/autoware/src/universe/external/morai_msgs \
+  --mount=type=bind,source=autoware/src/universe/external/muSSP,target=/autoware/src/universe/external/muSSP \
+  --mount=type=bind,source=autoware/src/universe/external/pointcloud_to_laserscan,target=/autoware/src/universe/external/pointcloud_to_laserscan \
+  --mount=type=bind,source=autoware/src/universe/external/rtklib_ros_bridge,target=/autoware/src/universe/external/rtklib_ros_bridge \
+  --mount=type=bind,source=autoware/src/universe/external/tier4_autoware_msgs,target=/autoware/src/universe/external/tier4_autoware_msgs \
+  --mount=type=bind,source=autoware/src/middleware/external,target=/autoware/src/middleware/external \
+  apt-get update \
+  && source /opt/ros/"$ROS_DISTRO"/setup.bash \
+  && for i in 1 2 3; do rosdep update && break || sleep 10; done \
+  && /scripts/resolve_rosdep_keys.sh /autoware/src "${ROS_DISTRO}" --dependency-types=exec > /tmp/rosdep-universe-common-exec-pkgs.txt \
+  && /scripts/resolve_rosdep_keys.sh /autoware/src "${ROS_DISTRO}" > /tmp/rosdep-universe-common-pkgs.txt \
+  && cat /tmp/rosdep-universe-common-pkgs.txt | xargs apt-get install -y --no-install-recommends \
+  && /scripts/cleanup_apt.sh
+
+# Build autoware-universe common packages
+RUN --mount=type=cache,target="${CCACHE_DIR}" \
+  --mount=type=bind,source=autoware/src/core,target=/autoware/src/core \
+  --mount=type=bind,source=autoware/src/universe/autoware_universe/common,target=/autoware/src/universe/autoware_universe/common \
+  --mount=type=bind,source=autoware/src/universe/autoware_universe/evaluator,target=/autoware/src/universe/autoware_universe/evaluator \
+  --mount=type=bind,source=autoware/src/universe/external/eagleye,target=/autoware/src/universe/external/eagleye \
+  --mount=type=bind,source=autoware/src/universe/external/glog,target=/autoware/src/universe/external/glog \
+  --mount=type=bind,source=autoware/src/universe/external/llh_converter,target=/autoware/src/universe/external/llh_converter \
+  --mount=type=bind,source=autoware/src/universe/external/managed_transform_buffer,target=/autoware/src/universe/external/managed_transform_buffer \
+  --mount=type=bind,source=autoware/src/universe/external/morai_msgs,target=/autoware/src/universe/external/morai_msgs \
+  --mount=type=bind,source=autoware/src/universe/external/muSSP,target=/autoware/src/universe/external/muSSP \
+  --mount=type=bind,source=autoware/src/universe/external/pointcloud_to_laserscan,target=/autoware/src/universe/external/pointcloud_to_laserscan \
+  --mount=type=bind,source=autoware/src/universe/external/rtklib_ros_bridge,target=/autoware/src/universe/external/rtklib_ros_bridge \
+  --mount=type=bind,source=autoware/src/universe/external/tier4_autoware_msgs,target=/autoware/src/universe/external/tier4_autoware_msgs \
+  --mount=type=bind,source=autoware/src/middleware/external,target=/autoware/src/middleware/external \
+  --mount=type=bind,source=autoware/src/launcher,target=/autoware/src/launcher \
+  source /opt/ros/"$ROS_DISTRO"/setup.bash \
+  && /scripts/build_and_clean.sh "${CCACHE_DIR}" /opt/autoware

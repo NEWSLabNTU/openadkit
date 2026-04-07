@@ -18,6 +18,13 @@ group "common" {
   ]
 }
 
+group "common-jp62" {
+  targets = [
+    "common-base-jp62",
+    "common-devel-jp62"
+  ]
+}
+
 group "component" {
   targets = [
     "sensing-perception",
@@ -41,8 +48,10 @@ group "universe-all" {
 // For docker/metadata-action
 target "docker-metadata-action-common-base" {}
 target "docker-metadata-action-common-base-cuda" {}
+target "docker-metadata-action-common-base-jp62" {}
 target "docker-metadata-action-common-devel" {}
 target "docker-metadata-action-common-devel-cuda" {}
+target "docker-metadata-action-common-devel-jp62" {}
 target "docker-metadata-action-sensing-perception" {}
 target "docker-metadata-action-sensing-perception-cuda" {}
 target "docker-metadata-action-localization-mapping" {}
@@ -76,6 +85,18 @@ target "common-devel-cuda" {
   inherits = ["docker-metadata-action-common-devel-cuda"]
   dockerfile = "components/common/Dockerfile"
   target = "common-devel-cuda"
+}
+
+target "common-base-jp62" {
+  inherits = ["docker-metadata-action-common-base-jp62"]
+  dockerfile = "components/common/Dockerfile.jp62"
+  target = "common-base-jp62"
+}
+
+target "common-devel-jp62" {
+  inherits = ["docker-metadata-action-common-devel-jp62"]
+  dockerfile = "components/common/Dockerfile.jp62"
+  target = "common-devel-jp62"
 }
 
 target "sensing-perception" {
