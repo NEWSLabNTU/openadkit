@@ -51,10 +51,23 @@ RUN rm -rf /usr/lib/libopencv* /usr/lib/cmake/opencv4 /usr/include/opencv4 \
 COPY components/common/jp62/opencv-preferences /etc/apt/preferences.d/opencv-preferences
 RUN apt-get update && apt-get install -y libopencv-dev
 
-# --- Replace L4T CMake 3.14.4 with system CMake >= 3.22 ---------------------
-# Autoware requires CMake >= 3.16. L4T ships 3.14.4 in /usr/local/bin.
+# --- Install CMake >= 3.24 from Kitware APT repository ----------------------
+# L4T ships CMake 3.14 which is too old. Ubuntu 22.04 system cmake is 3.22,
+# but 3.22 has a bug where find_library() fails when the result variable is
+# pre-set to "NOTFOUND" via set(). The ament_cmake_export_libraries template
+# relies on this pattern (set(_lib "NOTFOUND") before find_library(_lib ...)),
+# causing "exports the library X which couldn't be found" during colcon builds.
+# Fixed in CMake 3.24+. Pinned to 3.28.x to stay below 4.0 (which drops
+# cmake_minimum_required < 3.5 compat needed by some Autoware dependencies).
+# See: https://cmake.org/cmake/help/v3.24/command/find_library.html
 RUN rm -f /usr/local/bin/cmake /usr/local/bin/ctest /usr/local/bin/cpack /usr/local/bin/ccmake
-RUN apt-get update && apt-get install -y cmake
+RUN apt-get update && apt-get install -y ca-certificates gpg wget \
+  && wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null \
+       | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null \
+  && echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main" \
+       | tee /etc/apt/sources.list.d/kitware.list >/dev/null \
+  && apt-get update \
+  && apt-get install -y cmake-data=3.28.* cmake=3.28.*
 
 # --- Install ROS 2 from apt -------------------------------------------------
 # L4T does not ship ROS; install following the official Ubuntu debs guide.
@@ -66,6 +79,17 @@ RUN apt-get install -y curl gnupg lsb-release \
        | tee /etc/apt/sources.list.d/ros2.list > /dev/null \
   && apt-get update \
   && apt-get install -y ros-${ROS_DISTRO}-desktop ros-dev-tools
+
+# Fix ament_cmake_export_libraries cache variable pollution (ament_cmake#182).
+# The ament template reuses a shared cache variable "_lib" across all packages'
+# find_library() calls. When find_package(A) caches _lib=/path/to/libA.so, then
+# find_package(B) does set(_lib "NOTFOUND") which sets a normal variable but
+# doesn't clear the cache entry. Combined with cmake 3.22's behavior of skipping
+# search when the variable is "already set", this causes cross-package failures.
+# Fix: force-reset the cache entry and unset the normal variable before each
+# find_library, ensuring a fresh search. Requires cmake >= 3.24 (Kitware PPA).
+RUN find /opt/ros/${ROS_DISTRO}/share -name "ament_cmake_export_libraries-extras.cmake" \
+  -exec sed -i 's/set(_lib "NOTFOUND")/set(_lib "_lib-NOTFOUND" CACHE FILEPATH "" FORCE)\n      unset(_lib)/' {} +
 
 # rosdep update may fail on transient 503s from GitHub CDN; tolerate it here
 # since the devel stage runs rosdep update again before resolving keys.
@@ -113,7 +137,7 @@ ENV CCACHE_DIR="/root/.ccache"
 WORKDIR /autoware
 
 # Copy Autoware setup scripts and openadkit helper scripts
-COPY autoware/setup-dev-env.sh autoware/ansible-galaxy-requirements.yaml /autoware/
+COPY autoware/setup-dev-env.sh autoware/ansible-galaxy-requirements.yaml autoware/amd64.env autoware/amd64_jazzy.env autoware/arm64.env /autoware/
 COPY autoware/ansible/ /autoware/ansible/
 COPY components/common/scripts/ /scripts/
 RUN chmod -R +x /scripts/
@@ -161,6 +185,10 @@ RUN --mount=type=ssh \
   ./setup-dev-env.sh -y --module all --no-nvidia --no-cuda-drivers --ros-distro "$ROS_DISTRO" openadkit \
   && ./setup-dev-env.sh -y --module dev-tools --ros-distro "$ROS_DISTRO" openadkit \
   && pipx uninstall ansible \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+       ros-${ROS_DISTRO}-tensorrt-cmake-module \
+       ros-${ROS_DISTRO}-cudnn-cmake-module \
   && apt-mark manual ros-${ROS_DISTRO}-desktop ros-${ROS_DISTRO}-builtin-interfaces \
   && /scripts/cleanup_apt.sh \
   && echo "source /opt/ros/${ROS_DISTRO}/setup.bash" > /etc/bash.bashrc
@@ -192,9 +220,18 @@ RUN --mount=type=ssh \
   && /scripts/resolve_rosdep_keys.sh /autoware/src "${ROS_DISTRO}" --dependency-types=exec > /tmp/rosdep-universe-common-exec-pkgs.txt \
   && /scripts/resolve_rosdep_keys.sh /autoware/src "${ROS_DISTRO}" > /tmp/rosdep-universe-common-pkgs.txt \
   && cat /tmp/rosdep-universe-common-pkgs.txt | xargs apt-get install -y --no-install-recommends \
+  && dpkg -l | grep "^ii.*ros-${ROS_DISTRO}" | awk '{print $2}' | xargs apt-mark manual \
   && /scripts/cleanup_apt.sh
 
+# Intermediate target for debugging — buildable with --target common-devel-jp62-debug
+FROM common-devel-jp62 AS common-devel-jp62-debug
+RUN cmake --version && echo "Debug image ready"
+
 # Build autoware-universe common packages
+FROM common-devel-jp62 AS common-devel-jp62-build
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG ROS_DISTRO
+ENV CCACHE_DIR="/root/.ccache"
 RUN --mount=type=cache,target="${CCACHE_DIR}" \
   --mount=type=bind,source=autoware/src/core,target=/autoware/src/core \
   --mount=type=bind,source=autoware/src/universe/autoware_universe/common,target=/autoware/src/universe/autoware_universe/common \

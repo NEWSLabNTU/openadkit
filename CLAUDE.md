@@ -74,7 +74,10 @@ JP62 images fulfill the same contract as CUDA images (`common-base-cuda` / `comm
 - NVIDIA packages from L4T repos (not `ubuntu2204/sbsa`) — `setup-dev-env.sh` must use `--no-nvidia --no-cuda-drivers` to avoid conflicts
 - `CUDAARCHS=87` (Orin) set to avoid native detection failures under QEMU
 - spconv/cumm installed from pre-built Jetson ARM `.deb` packages
+- `ros-humble-tensorrt-cmake-module` and `ros-humble-cudnn-cmake-module` installed explicitly (skipped by `--no-nvidia` ansible)
 - colcon mixin index must be explicitly registered (not inherited from ros: Docker base image)
+- CMake 3.28 from Kitware PPA required: system cmake 3.22 has a `find_library()` bug where the `ament_cmake_export_libraries` template's `set(_lib "NOTFOUND")` pattern causes the search to be skipped. Additionally, the template reuses a shared `_lib` cache variable across packages, causing cross-package pollution ([ament_cmake#182](https://github.com/ament/ament_cmake/issues/182)). Both fixed by cmake 3.28 + a sed patch in the Dockerfile. Pinned to 3.28 to stay below 4.0
+- JP62 images must be built on native Jetson (arm64); x86 cross-compilation via QEMU hits intermittent `find_library` failures in cmake subprocess calls
 
 ### Deployment samples
 

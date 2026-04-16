@@ -39,38 +39,52 @@ docker buildx bake -f components/docker-bake.hcl \
 
 ## Progress
 
-### What works (validated 2026-04-09)
+### What works (validated 2026-04-13)
 
 - **jp62-setup** (15 steps): All pass. L4T base image bootstrapping, OpenCV 4.8→4.5.4 swap, CMake 3.14→3.22 upgrade, ROS 2 Humble desktop installation from apt, NVIDIA L4T package installation, CUDA environment configuration (CUDAARCHS=87), spconv/cumm Jetson ARM debs.
 - **common-base-jp62** (9 steps): All pass. Autoware setup scripts copied, `setup-dev-env.sh --module base --no-nvidia --no-cuda-drivers` completes successfully via ansible.
-- **common-devel-jp62** partial:
-  - `setup-dev-env.sh --module all --no-nvidia --no-cuda-drivers` + `--module dev-tools`: Pass. Ansible roles complete including acados (blasfeo arm64 assembly builds under QEMU with `POCF` binfmt flags).
+- **common-devel-jp62** all pre-build steps pass:
+  - `setup-dev-env.sh --module all --no-nvidia --no-cuda-drivers` + `--module dev-tools`: Pass.
   - colcon mixin registration: Pass (with retry for GitHub CDN flakiness).
   - rosdep dependency resolution and install: Pass (with retry for GitHub CDN 503s).
+- **colcon build**: Blocked on x86 by QEMU bug (see below). **Must be validated on native Jetson.**
 
-### Blocker: colcon build — `builtin_interfaces` cmake error
+### Resolved: cmake 3.22 `find_library` bug (fixed with cmake 3.28)
 
-The final colcon build step (`build_and_clean.sh`) fails with:
-
+The colcon build step failed with cmake 3.22 (Ubuntu 22.04 system default):
 ```
 Package 'builtin_interfaces' exports the library
 'builtin_interfaces__rosidl_generator_c' which couldn't be found
 ```
 
-**Root cause analysis:**
-- The `.so` file exists at `/opt/ros/humble/lib/libbuiltin_interfaces__rosidl_generator_c.so` (verified: valid ELF 64-bit ARM aarch64).
-- CMake `find_library` in script mode (`cmake -P`) finds it correctly.
-- CMake `find_library` within a colcon project context fails — the ament cmake export macro cannot locate the library despite it being at the expected path.
-- This is **not JP62-specific**: the existing x86 `components/common/Dockerfile` also cannot build against current Autoware `main` (fails earlier on missing `autoware/amd64.env` files that were removed upstream). Even if that COPY were fixed, the same colcon build issue would likely surface.
+**Root cause (confirmed 2026-04-15):** cmake 3.22's `find_library()` fails when the result variable is pre-set to `"NOTFOUND"`. The `ament_cmake_export_libraries` template does exactly this:
+```cmake
+set(_lib "NOTFOUND")
+find_library(_lib NAMES "${_library}" PATHS "..." NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+```
 
-**Likely resolution:** Pin the Autoware checkout to a specific release tag (e.g., the release the CI last built successfully against) rather than `main`. The x86 CI presumably builds against a known-good Autoware ref.
+On cmake 3.22, `find_library` sees `_lib` is "already set" and skips the search, even though the `.so` file exists on disk (confirmed via cmake `if(EXISTS)` and `ls` in the same cmake invocation). This is NOT a QEMU bug — cmake's `find_library` genuinely fails to search.
+
+**Evidence:**
+1. cmake `if(EXISTS "/opt/ros/humble/lib/libbuiltin_interfaces__rosidl_generator_c.so")` → YES
+2. `find_library(_lib ...)` in the same cmake run → `_lib-NOTFOUND`
+3. Upgrading to cmake 3.28 from Kitware PPA → `find_library` succeeds, colcon build passes
+
+**Root cause detail:** The `ament_cmake_export_libraries-extras.cmake` template uses a shared cache variable name `_lib` across ALL packages. When `find_package(A)` processes A's export template and caches `_lib = /path/to/libA.so`, then `find_package(B)`'s template does `set(_lib "NOTFOUND")` + `find_library(_lib ...)`. The `set()` creates a normal variable but does NOT clear the cache entry. `find_library` sees the cache entry is "already set" and skips the search, leaving `_lib` pointing to A's library instead of B's. This is a known ament_cmake design flaw (see [ament_cmake#182](https://github.com/ament/ament_cmake/issues/182), [ament_cmake#365](https://github.com/ament/ament_cmake/issues/365)).
+
+**Fix:** Two-part:
+1. Install cmake 3.28 from Kitware APT (3.24+ handles NOTFOUND re-search better). Pinned to 3.28.x: >= 3.24 for find_library fix, < 3.29 for FindPythonLibs compat, < 4.0 for cmake_minimum_required compat.
+2. Patch all ament export templates to `unset(_lib CACHE)` before `find_library`, clearing the stale cache entry from previous packages. This is applied via a RUN step in the Dockerfile.
+
+**Also required for building:**
+- Build against a pinned Autoware release tag (e.g., `1.7.1`), not `main`. Autoware `main` removed `.env` files referenced by the existing x86 `Dockerfile` COPY. The release workflow (`release-all-images.yaml`) already pins to semver tags.
+- `apt-mark manual` for all ROS packages before `cleanup_apt.sh` to prevent `apt-get autoremove` from removing ROS libraries installed as dependencies of `ros-humble-desktop`.
 
 ### Remaining work (not yet implemented)
 
 1. **CI workflow** (`build-all-images.yaml`): Add JP62 to the build matrix — new `include:` entries for `jp62` platform in `build-common`, `build-components`, and `build-universe` jobs.
 2. **Release workflow** (`release-all-images.yaml`): Same JP62 matrix additions.
 3. **Manifest action** (`combine-multi-arch-images/action.yaml`): Handle `jp62` as single-arch (arm64), similar to how `*cuda*` is handled as single-arch (amd64).
-4. **Pin Autoware ref**: Determine the correct Autoware release tag for JP62 builds and resolve the colcon `builtin_interfaces` issue.
 
 ## Key design decisions
 

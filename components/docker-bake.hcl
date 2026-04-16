@@ -96,7 +96,7 @@ target "common-base-jp62" {
 target "common-devel-jp62" {
   inherits = ["docker-metadata-action-common-devel-jp62"]
   dockerfile = "components/common/Dockerfile.jp62"
-  target = "common-devel-jp62"
+  target = "common-devel-jp62-build"
 }
 
 target "sensing-perception" {
