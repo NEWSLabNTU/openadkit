@@ -78,6 +78,7 @@ JP62 images fulfill the same contract as CUDA images (`common-base-cuda` / `comm
 - colcon mixin index must be explicitly registered (not inherited from ros: Docker base image)
 - CMake 3.28 from Kitware PPA required: system cmake 3.22 has a `find_library()` bug where the `ament_cmake_export_libraries` template's `set(_lib "NOTFOUND")` pattern causes the search to be skipped. Additionally, the template reuses a shared `_lib` cache variable across packages, causing cross-package pollution ([ament_cmake#182](https://github.com/ament/ament_cmake/issues/182)). Both fixed by cmake 3.28 + a sed patch in the Dockerfile. Pinned to 3.28 to stay below 4.0
 - JP62 images must be built on native Jetson (arm64); x86 cross-compilation via QEMU hits intermittent `find_library` failures in cmake subprocess calls
+- Autoware 1.7.1 hardcodes `-gencode arch=compute_101` (Blackwell) in 14 CUDA CMakeLists.txt files; CUDA 12.6 on JP62 only supports up to `compute_90`. Run `components/common/jp62/patch-cuda-arch.sh autoware/src` after cloning sources to gate these behind `CUDA_VERSION >= 12.8`
 
 ### Deployment samples
 

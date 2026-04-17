@@ -103,6 +103,14 @@ clone_repositories() {
 	fi
 }
 
+# Apply platform-specific source patches
+apply_patches() {
+	if [ "$is_jp62" = "true" ]; then
+		echo "Applying JP62 patches to Autoware sources..."
+		"$SCRIPT_DIR/components/common/jp62/patch-cuda-arch.sh" "$WORKSPACE_ROOT/autoware/src"
+	fi
+}
+
 # Build images
 build_images() {
 	# https://github.com/docker/buildx/issues/484
@@ -306,5 +314,6 @@ set_ros_distro
 set_build_options
 set_platform
 clone_repositories
+apply_patches
 build_images
 remove_dangling_images

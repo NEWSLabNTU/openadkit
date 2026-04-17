@@ -12,6 +12,7 @@ JP62 images fulfill the same contract as x86 CUDA images (`common-base-cuda` / `
 |------|---------|
 | `../Dockerfile.jp62` | Multi-stage Dockerfile: `jp62-setup` → `common-base-jp62` → `common-devel-jp62` |
 | `opencv-preferences` | APT pin to prefer Ubuntu OpenCV 4.5.4 over L4T's 4.8.0 |
+| `patch-cuda-arch.sh` | Patches Autoware CMakeLists.txt files to gate unsupported CUDA architectures (see below) |
 
 ## Architecture
 
@@ -79,6 +80,68 @@ On cmake 3.22, `find_library` sees `_lib` is "already set" and skips the search,
 **Also required for building:**
 - Build against a pinned Autoware release tag (e.g., `1.7.1`), not `main`. Autoware `main` removed `.env` files referenced by the existing x86 `Dockerfile` COPY. The release workflow (`release-all-images.yaml`) already pins to semver tags.
 - `apt-mark manual` for all ROS packages before `cleanup_apt.sh` to prevent `apt-get autoremove` from removing ROS libraries installed as dependencies of `ros-humble-desktop`.
+
+### Resolved: `nvcc fatal: Unsupported gpu architecture 'compute_101'` (Autoware 1.7.1)
+
+Autoware 1.7.1 hardcodes `CUDA_NVCC_FLAGS` with `-gencode arch=compute_101,code=sm_101` and `compute_120` in 14 CMakeLists.txt files across perception, sensing, and e2e packages. These architectures require CUDA 12.8+ (Blackwell), but the JP62 L4T base provides CUDA 12.6 which only supports up to `compute_90` (Hopper).
+
+The `CUDAARCHS=87` env var set in `Dockerfile.jp62` controls CMake's `CMAKE_CUDA_ARCHITECTURES`, but the affected packages use the legacy `find_package(CUDA)` / `cuda_add_library()` path with `CUDA_NVCC_FLAGS` directly — bypassing `CMAKE_CUDA_ARCHITECTURES` entirely.
+
+**Fix:** Gate the `compute_101`+ gencode flags behind `CUDA_VERSION VERSION_GREATER_EQUAL "12.8"` so they are only added when the toolkit actually supports them. The existing `compute_86/87/89` flags remain unconditional.
+
+Before (upstream):
+```cmake
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_86,code=sm_86")
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_87,code=sm_87")
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_89,code=sm_89")
+if(CUDA_VERSION VERSION_LESS "13.0")
+  list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_101,code=sm_101")
+else()  # CUDA 13.0 renamed SM101 to SM110
+  list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_110,code=sm_110")
+endif()
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_120,code=sm_120")
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_120,code=compute_120")
+```
+
+After (patched):
+```cmake
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_86,code=sm_86")
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_87,code=sm_87")
+list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_89,code=sm_89")
+# Only add newer architectures if the CUDA toolkit actually supports them
+if(CUDA_VERSION VERSION_GREATER_EQUAL "12.8")
+  if(CUDA_VERSION VERSION_LESS "13.0")
+    list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_101,code=sm_101")
+  else()  # CUDA 13.0 renamed SM101 to SM110
+    list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_110,code=sm_110")
+  endif()
+  list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_120,code=sm_120")
+  list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_120,code=compute_120")
+endif()
+```
+
+**Affected packages (14 files):**
+- `universe/autoware_universe/e2e/autoware_tensorrt_vad`
+- `universe/autoware_universe/perception/autoware_bevfusion`
+- `universe/autoware_universe/perception/autoware_ground_segmentation_cuda`
+- `universe/autoware_universe/perception/autoware_image_projection_based_fusion`
+- `universe/autoware_universe/perception/autoware_lidar_centerpoint`
+- `universe/autoware_universe/perception/autoware_lidar_frnet`
+- `universe/autoware_universe/perception/autoware_lidar_transfusion`
+- `universe/autoware_universe/perception/autoware_probabilistic_occupancy_grid_map`
+- `universe/autoware_universe/perception/autoware_ptv3`
+- `universe/autoware_universe/perception/autoware_tensorrt_classifier`
+- `universe/autoware_universe/perception/autoware_tensorrt_plugins`
+- `universe/autoware_universe/perception/autoware_tensorrt_yolox`
+- `universe/autoware_universe/sensing/autoware_calibration_status_classifier`
+- `universe/autoware_universe/sensing/autoware_cuda_pointcloud_preprocessor`
+
+**Applying the patch:** Run `components/common/jp62/patch-cuda-arch.sh` after cloning Autoware sources and before building:
+```bash
+./components/common/jp62/patch-cuda-arch.sh autoware/src
+```
+
+This patch is only needed for CUDA < 12.8 (i.e., JP62 with CUDA 12.6). On x86 with CUDA 12.8+ the upstream CMakeLists.txt files work as-is.
 
 ### Remaining work (not yet implemented)
 
