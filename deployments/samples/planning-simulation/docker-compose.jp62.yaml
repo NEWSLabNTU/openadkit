@@ -1,0 +1,37 @@
+# Override to use locally-built JP62 images for all services.
+# Usage: docker compose -f docker-compose.yaml -f docker-compose.jp62.yaml --env-file planning-simulation.env up -d
+#
+# JP62 images are built from L4T (not the ros: Docker base), so ROS_DISTRO
+# is not baked into the image. We set it here for the entrypoint script.
+x-jp62-common: &jp62-common
+  image: openadkit:universe-jp62
+  runtime: nvidia
+  environment:
+    - ROS_DISTRO=humble
+    - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    - ROS_DOMAIN_ID=${ROS_DOMAIN_ID}
+
+services:
+  map:
+    <<: *jp62-common
+  planning:
+    <<: *jp62-common
+  vehicle:
+    <<: *jp62-common
+  system:
+    <<: *jp62-common
+  control:
+    <<: *jp62-common
+  simulator:
+    <<: *jp62-common
+  api:
+    <<: *jp62-common
+  visualizer:
+    image: openadkit:visualizer-jp62
+    runtime: nvidia
+    environment:
+      - ROS_DISTRO=humble
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID}
+      - RVIZ_CONFIG=${RVIZ_CONFIG}
+      - USE_SIM_TIME=${USE_SIM_TIME}

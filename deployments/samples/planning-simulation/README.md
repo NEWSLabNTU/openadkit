@@ -21,6 +21,8 @@ unzip -d ~/autoware_map ~/autoware_map/sample-map-planning.zip
 
 ## Run the Deployment
 
+### x86 (amd64) — using pre-built images from GHCR
+
 1. Start the deployment by running the following command:
 
     ```bash
@@ -33,7 +35,7 @@ unzip -d ~/autoware_map ~/autoware_map/sample-map-planning.zip
     http://localhost:6080/vnc.html
     ```
 
-    Use the default password `openadkit` to access the visualizer. **It can take a few seconds to visualizer to start.**
+    Use the default password `openadkit` to access the visualizer. **It can take a few seconds for the visualizer to start.**
 
     > If your machine is on a remote server, you can access the visualizer by using its accessible IP address:
     >
@@ -43,8 +45,40 @@ unzip -d ~/autoware_map ~/autoware_map/sample-map-planning.zip
 
 3. After you see the visualizer, you can start the autonomous driving simulation by following the [planning simulation instructions](https://autowarefoundation.github.io/autoware-documentation/main/demos/planning-sim/lane-driving/#2-set-an-initial-pose-for-the-ego-vehicle) in the Autoware documentation.
 
+### Jetson (JP62) — using locally-built images
+
+The `docker-compose.jp62.yaml` override replaces all service images with locally-built JP62 images (`openadkit:universe-jp62` for components, `openadkit:visualizer-jp62` for the visualizer). It also adds `runtime: nvidia` for GPU access and sets `ROS_DISTRO=humble` (not baked into JP62 images since they are built from L4T, not the `ros:` Docker base).
+
+> **Prerequisites:** Build the JP62 images first with `./build.sh --platform jp62 --target universe` from the repo root.
+
+1. Start the deployment:
+
+    ```bash
+    docker compose -f docker-compose.yaml -f docker-compose.jp62.yaml --env-file planning-simulation.env up -d
+    ```
+
+2. Open the visualizer in a browser:
+
+    ```bash
+    http://<jetson-ip>:6080/vnc.html
+    ```
+
+    Use the default password `openadkit`.
+
+3. Follow the [planning simulation instructions](https://autowarefoundation.github.io/autoware-documentation/main/demos/planning-sim/lane-driving/#2-set-an-initial-pose-for-the-ego-vehicle) to set an initial pose and goal in RViz.
+
+> **Note:** Do not use `docker compose restart` — services share the `map` container's PID namespace (`pid: service:map`), so restarting breaks the namespace reference. Always use `down` followed by `up -d`.
+
 ## Stop the Deployment
+
+### x86
 
 ```bash
 docker compose --env-file planning-simulation.env down
+```
+
+### Jetson (JP62)
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.jp62.yaml --env-file planning-simulation.env down
 ```
