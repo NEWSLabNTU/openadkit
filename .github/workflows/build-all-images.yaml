@@ -13,6 +13,7 @@ on:
       - 'components/visualizer/**'
       - 'components/simulator/**'
       - 'components/universe/**'
+      - '.github/workflows/build-all-images.yaml'
   schedule:
     - cron: '0 0 1 * *'
   workflow_dispatch:
