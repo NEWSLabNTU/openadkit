@@ -124,15 +124,26 @@ FROM common-devel AS common-devel-cuda
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG ROS_DISTRO
 
-# Put the CUDA toolkit headers on the host compiler's include path. nvcc adds
-# this dir automatically for .cu files, but host C++ (.cpp) units that include
-# Thrust/CUB headers — e.g. bevdet_vendor's bevdet.cpp #include <thrust/sort.h> —
-# do not. On jammy the include is resolved via CMake's CUDA detection, but on
-# noble (jazzy) it is not, so the build fails without this.
-ENV CPATH="/usr/local/cuda/include"
-
 # Set up development environment with CUDA support
 RUN --mount=type=ssh \
   ./setup-dev-env.sh -y --module all --no-cuda-drivers --ros-distro "$ROS_DISTRO" openadkit  \
   && pipx uninstall ansible \
   && /scripts/cleanup_apt.sh true
+
+# CUDA 13 (jazzy/noble) moves Thrust/CUB/libcudacxx into the standalone
+# cuda-cccl package and relocates the headers under include/cccl/, which
+# cuda-minimal-build no longer pulls in. Without it, host C++ units that
+# include Thrust — e.g. bevdet_vendor's bevdet.cpp #include <thrust/sort.h> —
+# fail to compile. Derive the installed CUDA version from the toolkit symlink
+# and install the matching cuda-cccl. No-op on CUDA 12.8 (humble), where it is
+# already present and Thrust lives directly under include/.
+RUN cuda_dash="$(basename "$(readlink -f /usr/local/cuda)" | sed 's/^cuda-//; s/\./-/')" \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends "cuda-cccl-${cuda_dash}" \
+  && /scripts/cleanup_apt.sh true
+
+# Expose the CUDA toolkit headers to the host compiler. nvcc adds these for .cu
+# units automatically; host C++ (.cpp) units do not get them. include/cccl is
+# the CUDA 13 Thrust/CUB location; include covers CUDA 12.x. gcc ignores any
+# path here that does not exist on a given toolkit.
+ENV CPATH="/usr/local/cuda/include/cccl:/usr/local/cuda/include"
