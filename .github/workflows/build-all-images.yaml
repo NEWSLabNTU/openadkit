@@ -59,7 +59,7 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         platform: [linux/amd64, linux/arm64]
         ros-distro: [humble, jazzy]
@@ -194,11 +194,14 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         platform: [linux/amd64, linux/arm64]
         ros-distro: [humble, jazzy]
         target:
+          # CUDA variant first so the heaviest job dispatches early
+          # (excluded on arm64 below — CUDA is amd64-only)
+          - sensing-perception-cuda
           - sensing-perception
           - localization-mapping
           - planning-control
@@ -206,13 +209,8 @@ jobs:
           - api
           - visualizer
           - simulator
-        include:
-          # CUDA variant only on amd64
-          - platform: linux/amd64
-            ros-distro: humble
-            target: sensing-perception-cuda
-          - platform: linux/amd64
-            ros-distro: jazzy
+        exclude:
+          - platform: linux/arm64
             target: sensing-perception-cuda
     steps:
       - name: Install jq and vcs2l
@@ -290,7 +288,7 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         platform: [linux/amd64, linux/arm64]
         ros-distro: [humble, jazzy]
