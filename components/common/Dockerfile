@@ -124,6 +124,13 @@ FROM common-devel AS common-devel-cuda
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG ROS_DISTRO
 
+# Put the CUDA toolkit headers on the host compiler's include path. nvcc adds
+# this dir automatically for .cu files, but host C++ (.cpp) units that include
+# Thrust/CUB headers — e.g. bevdet_vendor's bevdet.cpp #include <thrust/sort.h> —
+# do not. On jammy the include is resolved via CMake's CUDA detection, but on
+# noble (jazzy) it is not, so the build fails without this.
+ENV CPATH="/usr/local/cuda/include"
+
 # Set up development environment with CUDA support
 RUN --mount=type=ssh \
   ./setup-dev-env.sh -y --module all --no-cuda-drivers --ros-distro "$ROS_DISTRO" openadkit  \
