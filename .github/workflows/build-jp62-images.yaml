@@ -115,13 +115,16 @@ jobs:
             --set "*.context=." \
             --set "*.platform=linux/arm64" \
             --set "*.args.ROS_DISTRO=${ROS_DISTRO}" \
-            --set "common-base-jp62.tags=${IMAGE_COMMON}:base-jp62-${TAG},${IMAGE_COMMON}:base-jp62" \
+            --set "common-base-jp62.tags=${IMAGE_COMMON}:base-jp62-${TAG}" \
             --set "common-base-jp62.cache-from=type=registry,ref=${BUILDCACHE}:common-base-jp62-main" \
             --set "common-base-jp62.cache-to=type=registry,ref=${BUILDCACHE}:common-base-jp62-main,mode=max" \
-            --set "common-devel-jp62.tags=${IMAGE_COMMON}:devel-jp62-${TAG},${IMAGE_COMMON}:devel-jp62" \
+            --set "common-devel-jp62.tags=${IMAGE_COMMON}:devel-jp62-${TAG}" \
             --set "common-devel-jp62.cache-from=type=registry,ref=${BUILDCACHE}:common-devel-jp62-main" \
             --set "common-devel-jp62.cache-to=type=registry,ref=${BUILDCACHE}:common-devel-jp62-main,mode=max" \
             common-base-jp62 common-devel-jp62
+          # Add stable tags pointing at the pinned digests (no rebuild).
+          docker buildx imagetools create -t "${IMAGE_COMMON}:base-jp62" "${IMAGE_COMMON}:base-jp62-${TAG}"
+          docker buildx imagetools create -t "${IMAGE_COMMON}:devel-jp62" "${IMAGE_COMMON}:devel-jp62-${TAG}"
         shell: bash
 
   # ===========================================================================
@@ -215,10 +218,12 @@ jobs:
             --set "*.args.COMMON_DEVEL_IMAGE=${IMAGE_COMMON}:devel-jp62-${TAG}" \
             --set "*.args.COMMON_BASE_CUDA_IMAGE=${IMAGE_COMMON}:base-jp62-${TAG}" \
             --set "*.args.COMMON_DEVEL_CUDA_IMAGE=${IMAGE_COMMON}:devel-jp62-${TAG}" \
-            --set "${{ matrix.target }}.tags=${IMAGE_COMPONENT}:${{ matrix.tag }}-${TAG},${IMAGE_COMPONENT}:${{ matrix.tag }}" \
+            --set "${{ matrix.target }}.tags=${IMAGE_COMPONENT}:${{ matrix.tag }}-${TAG}" \
             --set "${{ matrix.target }}.cache-from=type=registry,ref=${BUILDCACHE}:${{ matrix.tag }}-main" \
             --set "${{ matrix.target }}.cache-to=type=registry,ref=${BUILDCACHE}:${{ matrix.tag }}-main,mode=max" \
             "${{ matrix.target }}"
+          # Add stable tag pointing at the pinned digest (no rebuild).
+          docker buildx imagetools create -t "${IMAGE_COMPONENT}:${{ matrix.tag }}" "${IMAGE_COMPONENT}:${{ matrix.tag }}-${TAG}"
         shell: bash
 
   # ===========================================================================
@@ -295,8 +300,10 @@ jobs:
             --set "*.args.API_IMAGE=${IMAGE_COMPONENT}:api-jp62-${TAG}" \
             --set "*.args.VISUALIZER_IMAGE=${IMAGE_COMPONENT}:visualizer-jp62-${TAG}" \
             --set "*.args.SIMULATOR_IMAGE=${IMAGE_COMPONENT}:simulator-jp62-${TAG}" \
-            --set "universe-cuda.tags=${IMAGE_COMPONENT}:universe-jp62-${TAG},${IMAGE_COMPONENT}:universe-jp62" \
+            --set "universe-cuda.tags=${IMAGE_COMPONENT}:universe-jp62-${TAG}" \
             --set "universe-cuda.cache-from=type=registry,ref=${BUILDCACHE}:universe-jp62-main" \
             --set "universe-cuda.cache-to=type=registry,ref=${BUILDCACHE}:universe-jp62-main,mode=max" \
             universe-cuda
+          # Add stable tag pointing at the pinned digest (no rebuild).
+          docker buildx imagetools create -t "${IMAGE_COMPONENT}:universe-jp62" "${IMAGE_COMPONENT}:universe-jp62-${TAG}"
         shell: bash
