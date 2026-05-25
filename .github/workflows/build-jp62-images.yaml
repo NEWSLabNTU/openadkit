@@ -1,0 +1,302 @@
+name: build-jp62-images
+
+# Builds the Jetson Linux 6.2 (JP62) image chain on native arm64 runners and
+# pushes to GHCR. JP62 is single-arch (arm64), ROS Humble only, and CUDA is
+# always included (the L4T base ships it). The build mirrors `build.sh
+# --platform jp62 --target universe`: JP62 common images fulfil the CUDA
+# contract and are fed into the standard/CUDA component Dockerfiles.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'components/common/Dockerfile.jp62'
+      - 'components/common/jp62/**'
+      - 'components/**/Dockerfile.cuda'
+      - 'components/**/Dockerfile'
+      - 'components/docker-bake.hcl'
+      - '.github/workflows/build-jp62-images.yaml'
+
+concurrency:
+  group: build-jp62-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  BAKE_FILE: components/docker-bake.hcl
+  ROS_DISTRO: humble
+
+jobs:
+  # ===========================================================================
+  # Resolve shared inputs (Autoware ref, unique build tag, lowercase owner)
+  # ===========================================================================
+  prepare:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      autoware_ref: ${{ steps.prepare.outputs.autoware_ref }}
+      build_tag: ${{ steps.prepare.outputs.build_tag }}
+      owner_lower: ${{ steps.prepare.outputs.owner_lower }}
+    steps:
+      - name: Resolve shared build inputs
+        id: prepare
+        run: |
+          set -euo pipefail
+          autoware_ref=$(git ls-remote https://github.com/autowarefoundation/autoware refs/heads/main | cut -f1)
+          build_tag="$(date -u +'%Y%m%d')-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          owner_lower="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "autoware_ref=${autoware_ref}" >> "$GITHUB_OUTPUT"
+          echo "build_tag=${build_tag}" >> "$GITHUB_OUTPUT"
+          echo "owner_lower=${owner_lower}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+  # ===========================================================================
+  # Stage 1: JP62 common images (base + devel) from Dockerfile.jp62
+  # ===========================================================================
+  build-common-jp62:
+    runs-on: ubuntu-22.04-arm
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_COMMON: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-common
+      BUILDCACHE: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-buildcache
+      TAG: ${{ needs.prepare.outputs.build_tag }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+
+      - name: Install jq and vcs2l
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq pipx
+          pipx install vcs2l
+        shell: bash
+
+      - name: Checkout OpenADKit repository
+        uses: actions/checkout@v6
+
+      - name: Checkout Autoware repository
+        uses: actions/checkout@v6
+        with:
+          repository: autowarefoundation/autoware
+          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          path: autoware
+          fetch-depth: 1
+
+      - name: Pull Autoware source
+        run: |
+          mkdir -p autoware/src
+          vcs import --shallow autoware/src < autoware/repositories/autoware.repos
+        shell: bash
+
+      - name: Apply JP62 source patches
+        run: components/common/jp62/patch-cuda-arch.sh autoware/src
+        shell: bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push JP62 common images
+        run: |
+          export BUILDKIT_STEP_LOG_MAX_SIZE=10000000
+          docker buildx bake --push --progress=plain -f "$BAKE_FILE" \
+            --set "*.context=." \
+            --set "*.platform=linux/arm64" \
+            --set "*.args.ROS_DISTRO=${ROS_DISTRO}" \
+            --set "common-base-jp62.tags=${IMAGE_COMMON}:base-jp62-${TAG},${IMAGE_COMMON}:base-jp62" \
+            --set "common-base-jp62.cache-from=type=registry,ref=${BUILDCACHE}:common-base-jp62-main" \
+            --set "common-base-jp62.cache-to=type=registry,ref=${BUILDCACHE}:common-base-jp62-main,mode=max" \
+            --set "common-devel-jp62.tags=${IMAGE_COMMON}:devel-jp62-${TAG},${IMAGE_COMMON}:devel-jp62" \
+            --set "common-devel-jp62.cache-from=type=registry,ref=${BUILDCACHE}:common-devel-jp62-main" \
+            --set "common-devel-jp62.cache-to=type=registry,ref=${BUILDCACHE}:common-devel-jp62-main,mode=max" \
+            common-base-jp62 common-devel-jp62
+        shell: bash
+
+  # ===========================================================================
+  # Stage 2: JP62 component images (fed the JP62 common images)
+  # ===========================================================================
+  build-components-jp62:
+    runs-on: ubuntu-22.04-arm
+    needs: [prepare, build-common-jp62]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include:
+          - target: sensing-perception-cuda
+            tag: sensing-perception-jp62
+          - target: localization-mapping
+            tag: localization-mapping-jp62
+          - target: planning-control
+            tag: planning-control-jp62
+          - target: vehicle-system
+            tag: vehicle-system-jp62
+          - target: api
+            tag: api-jp62
+          - target: visualizer
+            tag: visualizer-jp62
+          - target: simulator
+            tag: simulator-jp62
+    env:
+      IMAGE_COMMON: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-common
+      IMAGE_COMPONENT: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit
+      BUILDCACHE: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-buildcache
+      TAG: ${{ needs.prepare.outputs.build_tag }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+
+      - name: Install jq and vcs2l
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq pipx
+          pipx install vcs2l
+        shell: bash
+
+      - name: Checkout OpenADKit repository
+        uses: actions/checkout@v6
+
+      - name: Checkout Autoware repository
+        uses: actions/checkout@v6
+        with:
+          repository: autowarefoundation/autoware
+          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          path: autoware
+          fetch-depth: 1
+
+      - name: Pull Autoware source
+        run: |
+          mkdir -p autoware/src
+          vcs import --shallow autoware/src < autoware/repositories/autoware.repos
+        shell: bash
+
+      - name: Apply JP62 source patches
+        run: components/common/jp62/patch-cuda-arch.sh autoware/src
+        shell: bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.target }} (JP62)
+        run: |
+          export BUILDKIT_STEP_LOG_MAX_SIZE=10000000
+          # The JP62 common images satisfy both the plain and CUDA base contracts,
+          # so all four common-image args point at them; each target reads only the
+          # args its Dockerfile declares.
+          docker buildx bake --push --progress=plain -f "$BAKE_FILE" \
+            --set "*.context=." \
+            --set "*.platform=linux/arm64" \
+            --set "*.args.ROS_DISTRO=${ROS_DISTRO}" \
+            --set "*.args.COMMON_BASE_IMAGE=${IMAGE_COMMON}:base-jp62-${TAG}" \
+            --set "*.args.COMMON_DEVEL_IMAGE=${IMAGE_COMMON}:devel-jp62-${TAG}" \
+            --set "*.args.COMMON_BASE_CUDA_IMAGE=${IMAGE_COMMON}:base-jp62-${TAG}" \
+            --set "*.args.COMMON_DEVEL_CUDA_IMAGE=${IMAGE_COMMON}:devel-jp62-${TAG}" \
+            --set "${{ matrix.target }}.tags=${IMAGE_COMPONENT}:${{ matrix.tag }}-${TAG},${IMAGE_COMPONENT}:${{ matrix.tag }}" \
+            --set "${{ matrix.target }}.cache-from=type=registry,ref=${BUILDCACHE}:${{ matrix.tag }}-main" \
+            --set "${{ matrix.target }}.cache-to=type=registry,ref=${BUILDCACHE}:${{ matrix.tag }}-main,mode=max" \
+            "${{ matrix.target }}"
+        shell: bash
+
+  # ===========================================================================
+  # Stage 3: JP62 universe image (merges all JP62 component install spaces)
+  # ===========================================================================
+  build-universe-jp62:
+    runs-on: ubuntu-22.04-arm
+    needs: [prepare, build-components-jp62]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_COMMON: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-common
+      IMAGE_COMPONENT: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit
+      BUILDCACHE: ghcr.io/${{ needs.prepare.outputs.owner_lower }}/openadkit-buildcache
+      TAG: ${{ needs.prepare.outputs.build_tag }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+
+      - name: Install jq and vcs2l
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq pipx
+          pipx install vcs2l
+        shell: bash
+
+      - name: Checkout OpenADKit repository
+        uses: actions/checkout@v6
+
+      - name: Checkout Autoware repository
+        uses: actions/checkout@v6
+        with:
+          repository: autowarefoundation/autoware
+          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          path: autoware
+          fetch-depth: 1
+
+      - name: Pull Autoware source
+        run: |
+          mkdir -p autoware/src
+          vcs import --shallow autoware/src < autoware/repositories/autoware.repos
+        shell: bash
+
+      - name: Apply JP62 source patches
+        run: components/common/jp62/patch-cuda-arch.sh autoware/src
+        shell: bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push universe (JP62)
+        run: |
+          export BUILDKIT_STEP_LOG_MAX_SIZE=10000000
+          docker buildx bake --push --progress=plain -f "$BAKE_FILE" \
+            --set "*.context=." \
+            --set "*.platform=linux/arm64" \
+            --set "*.args.ROS_DISTRO=${ROS_DISTRO}" \
+            --set "*.args.COMMON_BASE_CUDA_IMAGE=${IMAGE_COMMON}:base-jp62-${TAG}" \
+            --set "*.args.COMMON_DEVEL_CUDA_IMAGE=${IMAGE_COMMON}:devel-jp62-${TAG}" \
+            --set "*.args.SENSING_PERCEPTION_CUDA_IMAGE=${IMAGE_COMPONENT}:sensing-perception-jp62-${TAG}" \
+            --set "*.args.LOCALIZATION_MAPPING_IMAGE=${IMAGE_COMPONENT}:localization-mapping-jp62-${TAG}" \
+            --set "*.args.PLANNING_CONTROL_IMAGE=${IMAGE_COMPONENT}:planning-control-jp62-${TAG}" \
+            --set "*.args.VEHICLE_SYSTEM_IMAGE=${IMAGE_COMPONENT}:vehicle-system-jp62-${TAG}" \
+            --set "*.args.API_IMAGE=${IMAGE_COMPONENT}:api-jp62-${TAG}" \
+            --set "*.args.VISUALIZER_IMAGE=${IMAGE_COMPONENT}:visualizer-jp62-${TAG}" \
+            --set "*.args.SIMULATOR_IMAGE=${IMAGE_COMPONENT}:simulator-jp62-${TAG}" \
+            --set "universe-cuda.tags=${IMAGE_COMPONENT}:universe-jp62-${TAG},${IMAGE_COMPONENT}:universe-jp62" \
+            --set "universe-cuda.cache-from=type=registry,ref=${BUILDCACHE}:universe-jp62-main" \
+            --set "universe-cuda.cache-to=type=registry,ref=${BUILDCACHE}:universe-jp62-main,mode=max" \
+            universe-cuda
+        shell: bash
