@@ -25,6 +25,10 @@ env:
   REGISTRY: ghcr.io
   BAKE_FILE: components/docker-bake.hcl
   ROS_DISTRO: humble
+  # Dockerfile.jp62 targets Autoware 1.7.1: it COPYs the root *.env files and
+  # uses the setup-dev-env interface from that release. Autoware main has since
+  # removed those files, so JP62 is pinned to the 1.7.1 tag (not main HEAD).
+  AUTOWARE_REF: "1.7.1"
 
 jobs:
   # ===========================================================================
@@ -35,7 +39,6 @@ jobs:
     permissions:
       contents: read
     outputs:
-      autoware_ref: ${{ steps.prepare.outputs.autoware_ref }}
       build_tag: ${{ steps.prepare.outputs.build_tag }}
       owner_lower: ${{ steps.prepare.outputs.owner_lower }}
     steps:
@@ -43,10 +46,8 @@ jobs:
         id: prepare
         run: |
           set -euo pipefail
-          autoware_ref=$(git ls-remote https://github.com/autowarefoundation/autoware refs/heads/main | cut -f1)
           build_tag="$(date -u +'%Y%m%d')-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           owner_lower="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "autoware_ref=${autoware_ref}" >> "$GITHUB_OUTPUT"
           echo "build_tag=${build_tag}" >> "$GITHUB_OUTPUT"
           echo "owner_lower=${owner_lower}" >> "$GITHUB_OUTPUT"
         shell: bash
@@ -84,7 +85,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: autowarefoundation/autoware
-          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          ref: ${{ env.AUTOWARE_REF }}
           path: autoware
           fetch-depth: 1
 
@@ -180,7 +181,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: autowarefoundation/autoware
-          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          ref: ${{ env.AUTOWARE_REF }}
           path: autoware
           fetch-depth: 1
 
@@ -260,7 +261,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: autowarefoundation/autoware
-          ref: ${{ needs.prepare.outputs.autoware_ref }}
+          ref: ${{ env.AUTOWARE_REF }}
           path: autoware
           fetch-depth: 1
 
